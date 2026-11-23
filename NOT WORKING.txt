@@ -1,0 +1,239 @@
+ALB
+---
+# Listener
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.load_balancer.arn
+  port              = 80
+  protocol          = "HTTP"
+  # By default, return a simple 404 page
+  default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "404: page not found"
+      status_code  = 404
+    }
+  }
+}
+# Target group 
+resource "aws_lb_target_group" "instances" {
+  name     = "example-target-group"
+  port     = 8080
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.h-vpc.id
+  health_check {
+    path                = "/"
+    protocol            = "HTTP"
+    matcher             = "200"
+    interval            = 15
+    timeout             = 3
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+  }
+}
+# Target group ec2 attachments
+resource "aws_lb_target_group_attachment" "instance" {
+  count            = var.instance-count
+  target_group_arn = aws_lb_target_group.instances.arn
+  target_id        = aws_instance.huma[count.index].id
+  port             = 80
+}
+# Listener rule
+resource "aws_lb_listener_rule" "instances" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 100
+  condition {
+    path_pattern {
+      values = ["*"]
+    }
+  }
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.instances.arn
+  }
+}
+# Actual load balancer code
+resource "aws_lb" "load_balancer" {
+  name               = "web-app-lb"
+  load_balancer_type = "application"
+  subnets            = aws_subnet.subnets[*].id
+  #subnets            = [aws_subnet.webapp-public-subnet.id, aws_subnet.webapp-private-subnet.id]
+  security_groups = [aws_security_group.alb.id]
+}
+
+MAIN
+----
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~>4"
+    }
+  }
+}
+provider "aws" {
+  region = "us-east-1"
+}
+resource "aws_instance" "huma" {
+  count             = var.instance-count
+  ami               = "ami-0d172033d1c59b91f" # This is pre configured custom AMI
+  instance_type     = "t3.micro"
+  availability_zone = "us-east-1a"
+  associate_public_ip_address = true
+  vpc_security_group_ids = [aws_security_group.instances.id]
+    #subnet_id              = aws_subnet.subnets.id
+  subnet_id = aws_subnet.subnets[0].id
+  key_name               = "eric2026_windows"
+  tags = {
+    Name = "Huma online store with ALB ${count.index + 1}"
+  }
+  root_block_device {
+    volume_size = var.disk-size
+    volume_type = "gp3"
+  }
+  user_data = <<-EOF
+#!/bin/bash
+docker start my-shop || docker run -d -p 80:80 --name my-shop simplcommerce/ci-build
+EOF
+}
+variable "instance-count" {
+  description = "variable used to increment ec2 name"
+  type        = number
+  default     = 2
+}
+variable "disk-size" {
+  description = "to set Hard disk size"
+  type        = number
+  default     = 31
+}
+variable "i-name" {
+  description = "To set instance name for ALB"
+  type        = number
+  default     = 2
+}
+
+NETWORKING
+----------
+#VPC
+resource "aws_vpc" "h-vpc" {
+  cidr_block = "10.0.0.0/16"
+  tags = {
+    Name = "web-app-vpc"
+  }
+}
+#IGW
+resource "aws_internet_gateway" "h-igw" {
+  vpc_id = aws_vpc.h-vpc.id
+}
+#ROUTE TABLE
+resource "aws_route_table" "webapp-rt" {
+  vpc_id = aws_vpc.h-vpc.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.h-igw.id
+  }
+  tags = {
+    Name = "webapp-route-table"
+  }
+}
+#SUBNETS
+locals {
+  azs   = ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d"]
+  cidrs = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24", "10.0.4.0/24"]
+}
+resource "aws_subnet" "subnets" {
+  vpc_id = aws_vpc.h-vpc.id
+
+  #cidr_block              = "10.0.1.0/24"
+  count             = 4
+  availability_zone = local.azs[count.index]
+  cidr_block        = local.cidrs[count.index]
+  # map_public_ip_on_launch = true
+}
+# resource "aws_subnet" "webapp-private-subnet" {
+#   vpc_id            = aws_vpc.h-vpc.id
+#   cidr_block        = "10.0.2.0/24"
+#   availability_zone = "us-east-1b"
+#   # map_public_ip_on_launch = true
+# }
+#ROUTE TABLE ASSOCIATION
+# resource "aws_route_table_association" "webapp-rta" {
+#   subnet_id      = aws_subnet.webapp-public-subnet.id
+#   route_table_id = aws_route_table.webapp-rt.id
+# }
+#NI
+# resource "aws_network_interface" "webapp-NI" {
+#   subnet_id       = aws_subnet.webapp-public-subnet.id
+#   private_ips     = ["10.0.1.50"]
+#   security_groups = [aws_security_group.instances.id]
+# }
+# #EIP
+# resource "aws_eip" "webapp-EIP" {
+#   network_interface         = aws_network_interface.webapp-NI.id
+#   associate_with_private_ip = "10.0.1.50"
+# }
+
+SG
+--
+#security group instances
+resource "aws_security_group" "instances" {
+  name        = "instance-sec-group"
+  description = "allows web and rdp traffic inbound"
+  vpc_id      = aws_vpc.h-vpc.id
+
+  ingress {
+    description = "ssh"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    description = "web traffice"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    description = "https"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "allow outgoing"
+  }
+}
+# security group for ALBs
+resource "aws_security_group" "alb" {
+  name        = "alb-security-group"
+  description = "Security group rules for the load balancer"
+  vpc_id      = aws_vpc.h-vpc.id
+
+  ingress {
+    description = "To allow inbound on port 80"
+    protocol    = "tcp"
+    from_port   = 80
+    to_port     = 80
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    description = "To allow all outbound"
+    protocol    = "-1"
+    from_port   = 0
+    to_port     = 0
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+
+
+
+

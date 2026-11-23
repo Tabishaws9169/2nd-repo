@@ -1,0 +1,117 @@
+4 instances all in different private subnets, 2 public subnets housing 2 albs
+
+#VPC
+resource "aws_vpc" "h-vpc" {
+  cidr_block = "10.0.0.0/16"
+  tags = {
+    Name = "web-app-vpc"
+  }
+}
+#IGW
+resource "aws_internet_gateway" "h-igw" {
+  vpc_id = aws_vpc.h-vpc.id
+}
+#ROUTE TABLE
+resource "aws_route_table" "webapp-rt" {
+  vpc_id = aws_vpc.h-vpc.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.h-igw.id
+  }
+  tags = {
+    Name = "webapp-route-table"
+  }
+}
+#SUBNETS
+locals {
+  azs   = ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d"]
+  cidrs = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24", "10.0.4.0/24"]
+}
+resource "aws_subnet" "subnets" {
+  vpc_id = aws_vpc.h-vpc.id
+
+  #cidr_block              = "10.0.1.0/24"
+  count             = 4
+  tags = {
+    Name = "web-app-subnet ${count.index}"
+  }
+  availability_zone = local.azs[count.index]
+  cidr_block        = local.cidrs[count.index]
+  # map_public_ip_on_launch = true
+}
+#sn ass
+resource "aws_route_table_association" "web-sna" {
+    count = 4
+  subnet_id      = aws_subnet.subnets[count.index].id
+  route_table_id = aws_route_table.webapp-rt.id
+}
+resource "aws_instance" "huma" {
+  count             = var.instance-count
+  ami               = "ami-0d172033d1c59b91f" # This is pre configured custom AMI
+  instance_type     = "t3.micro"
+  # availability_zone = "us-east-1a"
+  associate_public_ip_address = true
+  vpc_security_group_ids = [aws_security_group.instances.id]
+    #subnet_id              = aws_subnet.subnets.id
+  subnet_id = aws_subnet.subnets[count.index].id
+  key_name               = "eric2026_windows"
+  tags = {
+    Name = "Huma online store with ALB ${count.index + 1}"
+  }
+  root_block_device {
+    volume_size = var.disk-size
+    volume_type = "gp3"
+  }
+  user_data = <<-EOF
+#!/bin/bash
+docker start my-shop || docker run -d -p 80:80 --name my-shop simplcommerce/ci-build
+EOF
+}
+variable "instance-count" {
+  description = "variable used to increment ec2 name"
+  type        = number
+  default     = 4
+}
+variable "disk-size" {
+  description = "to set Hard disk size"
+  type        = number
+  default     = 31
+}
+
+# SG
+#security group instances
+resource "aws_security_group" "instances" {
+  name        = "instance-sec-group"
+  description = "allows web and rdp traffic inbound"
+  vpc_id      = aws_vpc.h-vpc.id
+
+  ingress {
+    description = "ssh"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    description = "web traffice"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    description = "https"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "allow outgoing"
+  }
+}
